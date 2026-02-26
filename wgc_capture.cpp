@@ -4,13 +4,12 @@
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <windows.h>
+#include <dwmapi.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <winrt/Windows.Graphics.DirectX.h>
 
-// IDirect3DDxgiInterfaceAccess may not resolve from the interop header on all
-// SDK versions, so declare it explicitly.
 MIDL_INTERFACE("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")
 IDirect3DDxgiInterfaceAccess : public IUnknown {
   virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID iid, void **p) = 0;
@@ -18,6 +17,7 @@ IDirect3DDxgiInterfaceAccess : public IUnknown {
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "windowsapp.lib")
 
 using namespace winrt;
@@ -77,9 +77,22 @@ static GraphicsCaptureItem CreateCaptureItemForWindow(HWND hwnd) {
   return item;
 }
 
-// Returns: 0 = success, >0 = error code
-// When buffer is NULL, only populates outWidth/outHeight (query mode).
-// When buffer is non-NULL, captures pixels into buffer as BGRA.
+static void GetClientAreaOffset(HWND hwnd, int32_t *offsetX, int32_t *offsetY,
+                                int32_t *clientW, int32_t *clientH) {
+  RECT windowRect = {}, clientRect = {};
+  POINT clientOrigin = {0, 0};
+
+  DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &windowRect,
+                        sizeof(windowRect));
+  GetClientRect(hwnd, &clientRect);
+  ClientToScreen(hwnd, &clientOrigin);
+
+  *offsetX = clientOrigin.x - windowRect.left;
+  *offsetY = clientOrigin.y - windowRect.top;
+  *clientW = clientRect.right - clientRect.left;
+  *clientH = clientRect.bottom - clientRect.top;
+}
+
 extern "C" __declspec(dllexport) int32_t __stdcall
 WgcCaptureWindow(HWND hwnd, uint8_t *buffer, int32_t bufferSize,
                  int32_t *outWidth, int32_t *outHeight) {
@@ -87,27 +100,30 @@ WgcCaptureWindow(HWND hwnd, uint8_t *buffer, int32_t bufferSize,
     if (!InitD3D())
       return 1;
 
-    auto item = CreateCaptureItemForWindow(hwnd);
-    auto size = item.Size();
+    int32_t cropX = 0, cropY = 0, clientW = 0, clientH = 0;
+    GetClientAreaOffset(hwnd, &cropX, &cropY, &clientW, &clientH);
 
-    int32_t w = size.Width;
-    int32_t h = size.Height;
+    if (clientW <= 0 || clientH <= 0)
+      return 6;
 
     if (outWidth)
-      *outWidth = w;
+      *outWidth = clientW;
     if (outHeight)
-      *outHeight = h;
+      *outHeight = clientH;
 
     if (buffer == nullptr)
       return 0;
 
-    int32_t stride = w * 4;
-    int32_t requiredSize = stride * h;
+    int32_t outStride = clientW * 4;
+    int32_t requiredSize = outStride * clientH;
     if (bufferSize < requiredSize)
       return 2;
 
+    auto item = CreateCaptureItemForWindow(hwnd);
+    auto size = item.Size();
+
     auto framePool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-        g_winrtDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 1, size);
+        g_winrtDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
 
     auto session = framePool.CreateCaptureSession(item);
 
@@ -122,12 +138,19 @@ WgcCaptureWindow(HWND hwnd, uint8_t *buffer, int32_t bufferSize,
 
     HANDLE frameEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     Direct3D11CaptureFrame capturedFrame{nullptr};
+    int frameCount = 0;
 
     auto token = framePool.FrameArrived(
         [&](Direct3D11CaptureFramePool const &pool,
             winrt::Windows::Foundation::IInspectable const &) {
-          capturedFrame = pool.TryGetNextFrame();
-          SetEvent(frameEvent);
+          auto frame = pool.TryGetNextFrame();
+          frameCount++;
+          if (frameCount >= 2) {
+            capturedFrame = frame;
+            SetEvent(frameEvent);
+          } else {
+            frame.Close();
+          }
         });
 
     session.StartCapture();
@@ -164,8 +187,26 @@ WgcCaptureWindow(HWND hwnd, uint8_t *buffer, int32_t bufferSize,
     check_hresult(
         g_d3dContext->Map(stagingTex.get(), 0, D3D11_MAP_READ, 0, &mapped));
 
-    int32_t copyW = (int32_t)desc.Width < w ? (int32_t)desc.Width : w;
-    int32_t copyH = (int32_t)desc.Height < h ? (int32_t)desc.Height : h;
+    int32_t texW = (int32_t)desc.Width;
+    int32_t texH = (int32_t)desc.Height;
+
+    int32_t safeX = (cropX < texW) ? cropX : 0;
+    int32_t safeY = (cropY < texH) ? cropY : 0;
+    int32_t copyW = clientW;
+    int32_t copyH = clientH;
+
+    if (safeX + copyW > texW)
+      copyW = texW - safeX;
+    if (safeY + copyH > texH)
+      copyH = texH - safeY;
+
+    if (copyW <= 0 || copyH <= 0) {
+      g_d3dContext->Unmap(stagingTex.get(), 0);
+      capturedFrame.Close();
+      session.Close();
+      framePool.Close();
+      return 6;
+    }
 
     if (outWidth)
       *outWidth = copyW;
@@ -173,7 +214,8 @@ WgcCaptureWindow(HWND hwnd, uint8_t *buffer, int32_t bufferSize,
       *outHeight = copyH;
 
     for (int32_t y = 0; y < copyH; y++) {
-      uint8_t *srcRow = (uint8_t *)mapped.pData + y * mapped.RowPitch;
+      uint8_t *srcRow =
+          (uint8_t *)mapped.pData + (safeY + y) * mapped.RowPitch + safeX * 4;
       uint8_t *dstRow = buffer + y * (copyW * 4);
       memcpy(dstRow, srcRow, copyW * 4);
     }
