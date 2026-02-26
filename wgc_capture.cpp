@@ -18,6 +18,7 @@ IDirect3DDxgiInterfaceAccess : public IUnknown {
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "user32.lib")
 #pragma comment(lib, "windowsapp.lib")
 
 using namespace winrt;
