@@ -9,6 +9,13 @@
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <winrt/Windows.Graphics.DirectX.h>
 
+// IDirect3DDxgiInterfaceAccess may not resolve from the interop header on all
+// SDK versions, so declare it explicitly.
+MIDL_INTERFACE("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")
+IDirect3DDxgiInterfaceAccess : public IUnknown {
+  virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID iid, void **p) = 0;
+};
+
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "windowsapp.lib")
@@ -178,6 +185,7 @@ WgcCaptureWindow(HWND hwnd, uint8_t *buffer, int32_t bufferSize,
     framePool.Close();
 
     return 0;
+
   } catch (hresult_error const &) {
     return 4;
   } catch (...) {
