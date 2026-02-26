@@ -4,7 +4,6 @@
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <windows.h>
-#include <dwmapi.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
@@ -17,7 +16,7 @@ IDirect3DDxgiInterfaceAccess : public IUnknown {
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "dwmapi.lib")
+
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "windowsapp.lib")
 
@@ -83,8 +82,7 @@ static void GetClientAreaOffset(HWND hwnd, int32_t *offsetX, int32_t *offsetY,
   RECT windowRect = {}, clientRect = {};
   POINT clientOrigin = {0, 0};
 
-  DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &windowRect,
-                        sizeof(windowRect));
+  GetWindowRect(hwnd, &windowRect);
   GetClientRect(hwnd, &clientRect);
   ClientToScreen(hwnd, &clientOrigin);
 
